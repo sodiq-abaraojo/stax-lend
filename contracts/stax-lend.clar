@@ -249,3 +249,116 @@
     )
   )
 )
+
+;; Update loan interest (called before any loan operation)
+(define-private (update-loan-interest (loan-id uint))
+  ;; We assume loan validation has been done before calling this private function
+  (match (get-loan-details loan-id)
+    loan-data (let (
+        (current-height (get-current-stacks-block-height))
+        (blocks-elapsed (- current-height (get last-interest-height loan-data)))
+        (loan-amount (get loan-amount loan-data))
+        (new-interest (calculate-interest loan-amount blocks-elapsed))
+        (current-interest (get interest-accumulated loan-data))
+        (updated-interest (+ current-interest new-interest))
+        (protocol-fee (/ (* new-interest PROTOCOL-FEE-PERCENT) u100))
+      )
+      ;; Update protocol fees
+      (map-set protocol-fees current-height ;; Use current height as key
+        (+ (default-to u0 (map-get? protocol-fees current-height)) protocol-fee)
+      )
+      ;; Update loan with new interest
+      (map-set loans { loan-id: loan-id }
+        (merge loan-data {
+          interest-accumulated: updated-interest,
+          last-interest-height: current-height,
+        })
+      )
+      (ok updated-interest)
+    )
+    ERR-LOAN-NOT-FOUND
+  )
+)
+
+;; Repay loan (partial or full)
+(define-public (repay-loan
+    (loan-id uint)
+    (repay-amount uint)
+  )
+  (begin
+    (asserts! (not (var-get paused)) ERR-NOT-AUTHORIZED)
+    (asserts! (> repay-amount u0) ERR-INVALID-AMOUNT)
+    ;; Validate loan ID
+    (asserts! (<= loan-id (var-get loan-nonce)) ERR-INVALID-LOAN-ID)
+    (asserts! (is-some (get-loan-details loan-id)) ERR-LOAN-NOT-FOUND)
+    ;; Update loan interest first
+    (try! (update-loan-interest loan-id))
+    (match (get-loan-details loan-id)
+      loan-data (let (
+          (borrower (get borrower loan-data))
+          (loan-amount (get loan-amount loan-data))
+          (interest (get interest-accumulated loan-data))
+          (collateral (get collateral-amount loan-data))
+          (total-owed (+ loan-amount interest))
+          (is-full-repayment (>= repay-amount total-owed))
+          (actual-repayment (if is-full-repayment
+            total-owed
+            repay-amount
+          ))
+          (remaining-loan (if is-full-repayment
+            u0
+            (- loan-amount
+              (if (>= actual-repayment interest)
+                (- actual-repayment interest)
+                u0
+              ))
+          ))
+          (remaining-interest (if is-full-repayment
+            u0
+            (if (>= actual-repayment interest)
+              u0
+              (- interest actual-repayment)
+            )
+          ))
+        )
+        ;; Verify sender is the borrower
+        (asserts! (is-eq tx-sender borrower) ERR-NOT-AUTHORIZED)
+        ;; Transfer repayment from sender to contract
+        (try! (stx-transfer? actual-repayment tx-sender (as-contract tx-sender)))
+        (if is-full-repayment
+          (begin
+            ;; Close loan and return collateral for full repayment
+            (map-set loans { loan-id: loan-id }
+              (merge loan-data {
+                loan-amount: u0,
+                interest-accumulated: u0,
+                status: "repaid",
+              })
+            )
+            ;; Return collateral to user
+            (map-set user-deposits borrower
+              (+ (get-user-deposit borrower) collateral)
+            )
+            ;; Update total borrowed
+            (var-set total-borrowed (- (var-get total-borrowed) loan-amount))
+          )
+          (begin
+            ;; Update loan for partial repayment
+            (map-set loans { loan-id: loan-id }
+              (merge loan-data {
+                loan-amount: remaining-loan,
+                interest-accumulated: remaining-interest,
+              })
+            )
+            ;; Update total borrowed
+            (var-set total-borrowed
+              (- (var-get total-borrowed) (- loan-amount remaining-loan))
+            )
+          )
+        )
+        (ok actual-repayment)
+      )
+      ERR-LOAN-NOT-FOUND
+    )
+  )
+)
