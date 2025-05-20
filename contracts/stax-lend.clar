@@ -199,3 +199,53 @@
     )
   )
 )
+
+;; Create a new loan
+(define-public (borrow
+    (collateral-amount uint)
+    (loan-amount uint)
+  )
+  (begin
+    (asserts! (not (var-get paused)) ERR-NOT-AUTHORIZED)
+    (asserts! (> collateral-amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (> loan-amount u0) ERR-INVALID-AMOUNT)
+    (let (
+        (user-deposit (get-user-deposit tx-sender))
+        (collateral-value (* collateral-amount u1000)) ;; collateral value in basis points
+        (minimum-collateral-required (* loan-amount COLLATERAL-RATIO u10)) ;; minimum collateral needed
+        (loan-id (+ (var-get loan-nonce) u1))
+        (current-height (get-current-stacks-block-height))
+      )
+      ;; Check if user has enough collateral
+      (asserts! (>= user-deposit collateral-amount) ERR-INSUFFICIENT-BALANCE)
+      ;; Check if collateral ratio is sufficient
+      (asserts! (>= collateral-value minimum-collateral-required)
+        ERR-INSUFFICIENT-COLLATERAL
+      )
+      ;; Update user's available deposit (lock collateral)
+      (map-set user-deposits tx-sender (- user-deposit collateral-amount))
+      ;; Create loan record
+      (map-set loans { loan-id: loan-id } {
+        borrower: tx-sender,
+        collateral-amount: collateral-amount,
+        loan-amount: loan-amount,
+        interest-accumulated: u0,
+        creation-height: current-height,
+        last-interest-height: current-height,
+        status: "active",
+      })
+      ;; Update user's loan list
+      (map-set user-loans tx-sender
+        (unwrap! (as-max-len? (append (get-user-loans tx-sender) loan-id) u20)
+          ERR-NOT-AUTHORIZED
+        ))
+      ;; Update loan counter
+      (var-set loan-nonce loan-id)
+      ;; Update total borrowed
+      (var-set total-borrowed (+ (var-get total-borrowed) loan-amount))
+      ;; Transfer loan amount to borrower
+      (try! (as-contract (stx-transfer? loan-amount (as-contract tx-sender) tx-sender)))
+      (ok loan-id)
+    )
+  )
+)
