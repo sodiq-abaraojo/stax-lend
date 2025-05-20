@@ -107,3 +107,51 @@
     loan-count: (var-get loan-nonce),
   }
 )
+
+(define-read-only (calculate-interest
+    (principal-amount uint)
+    (blocks-elapsed uint)
+  )
+  (let (
+      (interest-per-block (/ (* principal-amount INTEREST-RATE-PER-BLOCK) u1000000))
+      (total-interest (* interest-per-block blocks-elapsed))
+    )
+    total-interest
+  )
+)
+
+(define-read-only (calculate-collateral-ratio
+    (collateral-amount uint)
+    (loan-amount uint)
+    (interest-accumulated uint)
+  )
+  (let ((total-debt (+ loan-amount interest-accumulated)))
+    (if (is-eq total-debt u0)
+      u0
+      (/ (* collateral-amount u1000) total-debt)
+    )
+  )
+)
+
+(define-read-only (is-liquidatable (loan-id uint))
+  ;; Check if loan ID is valid first
+  (if (or (> loan-id (var-get loan-nonce)) (is-none (get-loan-details loan-id)))
+    false
+    (match (get-loan-details loan-id)
+      loan-data (let (
+          (updated-interest (+ (get interest-accumulated loan-data)
+            (calculate-interest (get loan-amount loan-data)
+              (- (get-current-stacks-block-height)
+                (get last-interest-height loan-data)
+              ))
+          ))
+          (collateral-ratio (calculate-collateral-ratio (get collateral-amount loan-data)
+            (get loan-amount loan-data) updated-interest
+          ))
+        )
+        (< collateral-ratio (* LIQUIDATION-THRESHOLD u10))
+      )
+      false
+    )
+  )
+)
