@@ -464,3 +464,51 @@
     false
   )
 )
+
+(define-read-only (get-loan-health (loan-id uint))
+  ;; First validate the loan ID 
+  (if (or (> loan-id (var-get loan-nonce)) (is-none (get-loan-details loan-id)))
+    (err ERR-LOAN-NOT-FOUND)
+    (match (get-loan-details loan-id)
+      loan-data (let (
+          (updated-interest (+ (get interest-accumulated loan-data)
+            (calculate-interest (get loan-amount loan-data)
+              (- (get-current-stacks-block-height)
+                (get last-interest-height loan-data)
+              ))
+          ))
+          (collateral-ratio (calculate-collateral-ratio (get collateral-amount loan-data)
+            (get loan-amount loan-data) updated-interest
+          ))
+        )
+        (ok {
+          collateral-ratio: collateral-ratio,
+          liquidation-threshold: (* LIQUIDATION-THRESHOLD u10),
+          is-healthy: (>= collateral-ratio (* LIQUIDATION-THRESHOLD u10)),
+        })
+      )
+      (err ERR-LOAN-NOT-FOUND)
+    )
+  )
+)
+
+(define-read-only (get-market-info)
+  {
+    collateral-ratio-required: COLLATERAL-RATIO,
+    liquidation-threshold: LIQUIDATION-THRESHOLD,
+    yearly-interest-rate: INTEREST-RATE-YEARLY,
+    protocol-fee: PROTOCOL-FEE-PERCENT,
+  }
+)
+
+;; Protocol Initialization
+
+(begin
+  ;; Initialize protocol state
+  (var-set loan-nonce u0)
+  (var-set total-collateral u0)
+  (var-set total-borrowed u0)
+  (var-set paused false)
+  ;; Set initial protocol fees to zero for the current block
+  (map-set protocol-fees (get-current-stacks-block-height) u0)
+)
