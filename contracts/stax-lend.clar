@@ -155,3 +155,47 @@
     )
   )
 )
+
+;; Core Protocol Functions
+
+;; Deposit assets as collateral
+(define-public (deposit (amount uint))
+  (begin
+    (asserts! (not (var-get paused)) ERR-NOT-AUTHORIZED)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    ;; Transfer STX from sender to contract
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    ;; Update user's deposit balance
+    (map-set user-deposits tx-sender (+ (get-user-deposit tx-sender) amount))
+    ;; Update total deposits
+    (map-set total-deposits (get-current-stacks-block-height)
+      (+
+        (default-to u0
+          (map-get? total-deposits (get-current-stacks-block-height))
+        )
+        amount
+      ))
+    ;; Update total collateral
+    (var-set total-collateral (+ (var-get total-collateral) amount))
+    (ok amount)
+  )
+)
+
+;; Withdraw collateral
+(define-public (withdraw (amount uint))
+  (begin
+    (asserts! (not (var-get paused)) ERR-NOT-AUTHORIZED)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (let ((current-deposit (get-user-deposit tx-sender)))
+      ;; Check if user has enough balance
+      (asserts! (>= current-deposit amount) ERR-INSUFFICIENT-BALANCE)
+      ;; Transfer STX from contract to sender
+      (try! (as-contract (stx-transfer? amount (as-contract tx-sender) tx-sender)))
+      ;; Update user's deposit balance
+      (map-set user-deposits tx-sender (- current-deposit amount))
+      ;; Update total collateral
+      (var-set total-collateral (- (var-get total-collateral) amount))
+      (ok amount)
+    )
+  )
+)
