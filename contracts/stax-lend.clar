@@ -362,3 +362,105 @@
     )
   )
 )
+
+;; Liquidate an undercollateralized loan
+(define-public (liquidate (loan-id uint))
+  (begin
+    (asserts! (not (var-get paused)) ERR-NOT-AUTHORIZED)
+    ;; Validate loan ID
+    (asserts! (<= loan-id (var-get loan-nonce)) ERR-INVALID-LOAN-ID)
+    (asserts! (is-some (get-loan-details loan-id)) ERR-LOAN-NOT-FOUND)
+    ;; Update loan interest first
+    (try! (update-loan-interest loan-id))
+    ;; Check if loan is liquidatable
+    (asserts! (is-liquidatable loan-id) ERR-LOAN-NOT-LIQUIDATABLE)
+    (match (get-loan-details loan-id)
+      loan-data (let (
+          (borrower (get borrower loan-data))
+          (loan-amount (get loan-amount loan-data))
+          (interest (get interest-accumulated loan-data))
+          (collateral (get collateral-amount loan-data))
+          (total-debt (+ loan-amount interest))
+          (liquidation-bonus (/ (* collateral u5) u100)) ;; 5% of collateral as bonus
+          (collateral-for-liquidator (- collateral liquidation-bonus))
+          (protocol-fee-from-liquidation (/ (* liquidation-bonus u50) u100)) ;; 50% of bonus to protocol
+          (liquidator-bonus (- liquidation-bonus protocol-fee-from-liquidation))
+          (current-height (get-current-stacks-block-height))
+        )
+        ;; Liquidator must pay the full debt
+        (try! (stx-transfer? total-debt tx-sender (as-contract tx-sender)))
+        ;; Transfer collateral minus bonus to liquidator
+        (map-set user-deposits tx-sender
+          (+ (get-user-deposit tx-sender) collateral-for-liquidator)
+        )
+        ;; Add liquidator bonus to liquidator
+        (map-set user-deposits tx-sender
+          (+ (get-user-deposit tx-sender) liquidator-bonus)
+        )
+        ;; Add protocol fee from liquidation
+        (map-set protocol-fees current-height
+          (+ (default-to u0 (map-get? protocol-fees current-height))
+            protocol-fee-from-liquidation
+          ))
+        ;; Mark loan as liquidated
+        (map-set loans { loan-id: loan-id }
+          (merge loan-data {
+            loan-amount: u0,
+            interest-accumulated: u0,
+            collateral-amount: u0,
+            status: "liquidated",
+          })
+        )
+        ;; Update total borrowed
+        (var-set total-borrowed (- (var-get total-borrowed) loan-amount))
+        ;; Update total collateral
+        (var-set total-collateral (- (var-get total-collateral) collateral))
+        (ok true)
+      )
+      ERR-LOAN-NOT-FOUND
+    )
+  )
+)
+
+;; Admin Functions
+
+;; Withdraw protocol fees (admin only)
+(define-public (withdraw-protocol-fees (amount uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (let (
+        (current-height (get-current-stacks-block-height))
+        (available-fees (default-to u0 (map-get? protocol-fees current-height)))
+      )
+      (asserts! (>= available-fees amount) ERR-INSUFFICIENT-BALANCE)
+      ;; Transfer fees to contract owner
+      (try! (as-contract (stx-transfer? amount (as-contract tx-sender) CONTRACT-OWNER)))
+      ;; Update protocol fees
+      (map-set protocol-fees current-height (- available-fees amount))
+      (ok amount)
+    )
+  )
+)
+
+;; Read-Only Functions for UI Integration
+
+(define-read-only (get-user-loan-ids (user principal))
+  (get-user-loans user)
+)
+
+(define-read-only (get-user-active-loans (user principal))
+  (let (
+      (loan-ids (get-user-loans user))
+      (active-loans (filter is-loan-active loan-ids))
+    )
+    active-loans
+  )
+)
+
+(define-private (is-loan-active (loan-id uint))
+  (match (get-loan-details loan-id)
+    loan-data (is-eq (get status loan-data) "active")
+    false
+  )
+)
